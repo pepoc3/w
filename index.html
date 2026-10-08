@@ -1,0 +1,124 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name='referrer' content='no-referrer'>
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>企业微信 JS-SDK 客户端验证页 v2</title>
+<style>
+ body{font-family:-apple-system,"Microsoft YaHei",sans-serif;margin:14px;line-height:1.6;background:#fafafa}
+ .box{border:1px solid #ddd;border-radius:8px;padding:10px;margin:10px 0;background:#fff}
+ .ok{color:#0a0;font-weight:700}.bad{color:#c00;font-weight:700}.warn{color:#b60}
+ code{background:#f5f5f5;padding:1px 4px;border-radius:3px;word-break:break-all}
+ input{width:100%;box-sizing:border-box;padding:6px;margin:4px 0;border:1px solid #ccc;border-radius:4px}
+ button{padding:10px 14px;margin:4px 6px 4px 0;border:0;border-radius:6px;background:#07c160;color:#fff;font-size:15px}
+ button.gray{background:#888}button.red{background:#c00}
+ #log div{border-bottom:1px dashed #eee;padding:4px 0;font-size:14px}
+ .big{font-size:17px}
+</style>
+</head>
+<body>
+<h3>企业微信 JS-SDK 客户端验证页 v2</h3>
+
+<div class="box">
+ <div class="warn">用途：在<strong>真实企业微信客户端内</strong>打开本页，验证从目标签名接口拿到的票据能否通过 <code>wx.config</code> 校验。仅限授权测试，建议使用测试账号；本页不会主动调用扫一扫、定位等敏感接口，只用 checkJsApi 查询可用性。</div>
+</div>
+
+<div class="box">
+ <label>corpid：<input id="corpid" placeholder="ww0000000000000000"></label>
+ <label>jsapi_ticket：<input id="ticket" placeholder="从 getSignature.do 取回的 jsapi_ticket"></label>
+ <label>签名 URL（默认当前页，去掉 # 之后的部分）：<input id="url"></label>
+ <label><input type="checkbox" id="debug" style="width:auto" checked> debug=true（弹窗显示 errMsg，便于留证）</label>
+ <label><input type="checkbox" id="tamper" style="width:auto"> 负向对照（故意篡改签名，应当失败）</label>
+ <button onclick="doConfig()">① 计算签名并 wx.config</button>
+ <button class="red" onclick="doConfig(true)">② 负向对照（篡改签名）</button>
+ <button class="gray" onclick="document.getElementById('log').innerHTML=''">清空日志</button>
+ <button class="gray" onclick="copyResult()">复制结果</button>
+</div>
+
+<div class="box">
+ <div>页面 URL：<code id="evUrl"></code></div>
+ <div>客户端 UA：<code id="evUa"></code></div>
+ <div>是否企微容器：<span id="evEnv">检测中…</span></div>
+ <div class="big">最终结论：<span id="evResult" class="warn">等待执行…</span></div>
+</div>
+
+<div class="box" id="log"><div>日志：</div></div>
+
+<div class="box">
+ <strong>操作步骤</strong>
+ <ol>
+  <li>在电脑上取票据：<code>curl -s 'https://your-target.example/mweb-json/getSignature.do?url=&lt;本页完整URL&gt;'</code>，把 corpid 和 jsapi_ticket 填到上面（票据轮换很快，取完立即测）。</li>
+  <li>本页 URL 与第 1 步 url 参数必须完全一致（https、大小写、末尾斜杠、query 全部一致，不要带 #）。</li>
+  <li>把本页部署到 HTTPS 地址（如 Cloudflare Tunnel / 自建 VPS / 目标可信域名下的测试文件）。</li>
+  <li>在企微聊天里把链接发给自己/测试同事，<strong>在聊天中点击打开</strong>（不是用系统浏览器或微信打开）。<br>可在链接后加 <code>?corpid=xxx&amp;ticket=xxx</code> 自动填参，手机上无需手输。</li>
+  <li>先点②负向对照，确认会失败（证明测试环境有效）；再点①正式验证。</li>
+  <li>录屏 + 截图保存：页面结论、errMsg 原文、企微版本号、时间。</li>
+ </ol>
+ <div class="warn">判读：wx.ready 触发 = 该域名/URL 的签名被客户端接受（危害升级）；
+  wx.error 且 errMsg 含签名或域名相关错误 = 客户端校验拦截（记录原文，危害降级为票据泄露+条件性滥用）。</div>
+</div>
+
+<script src="https://res.wx.qq.com/open/js/jweixin-1.6.0.js"></script>
+<script>
+var last = {};
+function log(m,c){document.getElementById('log').innerHTML+='<div class="'+(c||'')+'">'+m+'</div>';}
+function sha1hex(s){return crypto.subtle.digest('SHA-1',new TextEncoder().encode(s)).then(function(b){
+  return [].map.call(new Uint8Array(b),function(x){return x.toString(16).padStart(2,'0')}).join('');});}
+function setResult(t,c){var e=document.getElementById('evResult');e.textContent=t;e.className='big '+(c||'');}
+function doConfig(forceTamper){
+  var corpid=document.getElementById('corpid').value.trim();
+  var ticket=document.getElementById('ticket').value.trim();
+  var url=document.getElementById('url').value.trim();
+  var tamper=forceTamper||document.getElementById('tamper').checked;
+  var dbg=document.getElementById('debug').checked;
+  document.getElementById('log').innerHTML='<div>日志：</div>';
+  if(!corpid||!ticket){setResult('缺少 corpid 或 ticket','bad');return;}
+  if(typeof wx==='undefined'){log('wx 未加载：当前不是企业微信内置浏览器，请复制链接到企微聊天中打开。','bad');setResult('不在企微容器内','bad');return;}
+  var nonceStr=Math.random().toString(36).slice(2)+Math.random().toString(36).slice(2);
+  var timestamp=Math.floor(Date.now()/1000).toString();
+  var raw='jsapi_ticket='+ticket+'&noncestr='+nonceStr+'&timestamp='+timestamp+'&url='+url;
+  sha1hex(raw).then(function(sig){
+    if(tamper){sig=(sig[0]==='0'?'1':'0')+sig.slice(1);log('负向对照：签名已被篡改，预期 wx.config 失败。','warn');}
+    last={corpid:corpid,url:url,nonceStr:nonceStr,timestamp:timestamp,signature:sig,tamper:tamper};
+    log('签名串（ticket 已打码）：<code>jsapi_ticket=***&noncestr='+nonceStr+'&timestamp='+timestamp+'&url='+url+'</code>');
+    log('signature=<code>'+sig+'</code>');
+    setResult('已发起 wx.config，等待回调…','warn');
+    wx.config({beta:true,debug:dbg,appId:corpid,timestamp:timestamp,nonceStr:nonceStr,signature:sig,
+      jsApiList:['checkJsApi','getContext','getLocation','chooseImage','scanQRCode','openUserProfile','previewFile']});
+    wx.ready(function(){
+      log('★ wx.ready 触发：签名被企业微信客户端接受。','ok');
+      setResult('wx.ready 触发：签名被客户端接受','ok');
+      wx.checkJsApi({jsApiList:['getContext','getLocation','chooseImage','scanQRCode','openUserProfile','previewFile'],
+        success:function(res){log('checkJsApi 可用性：<code>'+JSON.stringify(res.checkResult||{})+'</code>');},
+        fail:function(e){log('checkJsApi 失败：'+JSON.stringify(e),'bad');}});
+    });
+    wx.error(function(e){
+      log('wx.error：<code>'+JSON.stringify(e)+'</code>','bad');
+      setResult('wx.config 失败：'+(e&&(e.errMsg||e.err_msg)||JSON.stringify(e)),'bad');
+    });
+  });
+}
+function copyResult(){
+  var t='UA: '+document.getElementById('evUa').textContent+'\nURL: '+last.url+'\ncorpid: '+last.corpid+
+        '\ntimestamp: '+last.timestamp+'\nnonceStr: '+last.nonceStr+'\nsignature: '+last.signature+
+        '\n结论: '+document.getElementById('evResult').textContent+'\n日志:\n'+
+        document.getElementById('log').innerText;
+  navigator.clipboard&&navigator.clipboard.writeText(t).then(function(){alert('已复制');},function(){alert(t)});
+}
+(function(){
+  document.getElementById('url').value=location.href.split('#')[0];
+  try{var q=new URLSearchParams(location.search);var h=new URLSearchParams(location.hash.replace(/^#\/?/,''));
+    var g=function(k){return q.get(k)||h.get(k)||''};
+    if(g('corpid')) document.getElementById('corpid').value=g('corpid');
+    if(g('ticket')) document.getElementById('ticket').value=g('ticket');}catch(e){}
+  document.getElementById('evUrl').textContent=location.href.split('#')[0];
+  document.getElementById('evUa').textContent=navigator.userAgent;
+  var ua=navigator.userAgent.toLowerCase();
+  var inWx=ua.indexOf('wxwork')>-1||ua.indexOf('micromessenger')>-1;
+  document.getElementById('evEnv').textContent=inWx?'是（'+navigator.userAgent.match(/wxwork\/[\d.]+/i)+'）':'否（请在企微中打开）';
+  document.getElementById('evEnv').className=inWx?'ok':'bad';
+})();
+</script>
+</body>
+</html>
